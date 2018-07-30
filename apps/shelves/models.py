@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*-
+
+from django.db import models
+from apps.workorder.models import SpareBrandList, ModelList, IDCList
+from apps.workorder.models import FaultList, User
+# Create your models here.
+class CheckCount(models.Model):
+    '''
+上架验收结果记录
+    '''
+    cc_date = models.DateField(auto_now_add=True) 
+    cc_batch = models.CharField(max_length=64,default=None)
+    id_brand = models.ForeignKey(SpareBrandList,null=True,blank=True)
+    cc_sum = models.IntegerField(null=True,blank=True)
+    cc_onetime_pass = models.IntegerField(null=True,blank=True)
+    cc_failcount = models.IntegerField(null=True,blank=True)
+    cc_start_time = models.DateTimeField(auto_now_add=True)
+    cc_end_time = models.DateTimeField(auto_now=True) 
+    class Meta:
+        unique_together = ("cc_batch","id_brand")
+    def __unicode__(self):
+        return '%s:%s' %(self.id_brand.brand_en,self.cc_batch)
+
+
+class StandardData(models.Model):
+    '''
+ROC标准数据
+    '''
+    std_date = models.DateField()
+    std_sn = models.CharField(max_length=64)
+    id_model = models.ForeignKey(ModelList,null=True,blank=False)
+    id_brand = models.ForeignKey(SpareBrandList,null=True,blank=True)
+    std_batch = models.CharField(max_length=64)
+    std_rack_id = models.CharField(max_length=64)
+    id_idc = models.ForeignKey(IDCList,null=True,blank=False)
+    std_ilo_ip = models.GenericIPAddressField()
+    std_bios_v = models.CharField(max_length=128,default="")
+    std_cpu = models.CharField(max_length=128)
+    std_mem = models.CharField(max_length=128)
+    std_disk = models.CharField(max_length=1024)
+    std_nic = models.CharField(max_length=128)
+    std_nic_speed = models.CharField(max_length=128)
+    std_power = models.CharField(max_length=128)
+    std_raid = models.CharField(max_length=64)
+    std_raidcard = models.CharField(max_length=64)
+    std_mac0 = models.CharField(max_length=64)
+    std_mac1 = models.CharField(max_length=64)
+    std_cable0 = models.CharField(max_length=64)
+    std_cable1 = models.CharField(max_length=64)
+    std_ilo_st = models.CharField(max_length=128)
+    std_extend = models.CharField(max_length=128, null=True, default="")
+    std_real_exist = models.BooleanField(default=False) # 是否有接口数据
+    std_onetime_pass = models.BooleanField(default=False)
+    std_check_ok = models.IntegerField(null=True,blank=True,default=0)
+    std_start = models.DateTimeField(null=True,default=None)
+    std_update = models.DateTimeField(auto_now=True)
+    std_entity_id = models.CharField(max_length=32,null=True,default=None)
+    class Meta:
+        unique_together = ("std_batch","std_sn")
+    def __unicode__(self):
+        return 'std:%s,%s' %(self.std_batch, self.std_sn)
+
+
+class CheckFailData(models.Model):
+    '''
+上架验收中出错过的数据
+    '''
+    #ck_date = models.DateField(auto_now_add=True)
+    ck_date = models.DateField()
+    ck_sn = models.CharField(max_length=64)
+    ck_batch = models.CharField(max_length=64)
+    id_model = models.ForeignKey(ModelList,null=True,blank=False)
+    id_brand = models.ForeignKey(SpareBrandList,null=True,blank=True)
+    ck_rack_id = models.CharField(max_length=64)
+    #ck_ilo_ip = models.GenericIPAddressField(null=True,blank=True)
+    ck_ilo_ip = models.CharField(max_length=128,default="")
+    ck_bios_v = models.CharField(max_length=128,default="")
+    ck_cpu = models.CharField(max_length=512)
+    ck_mem = models.CharField(max_length=512)
+    ck_disk = models.CharField(max_length=1024)
+    ck_nic = models.CharField(max_length=512)
+    ck_nic_speed = models.CharField(max_length=128)
+    ck_power = models.CharField(max_length=128)
+    ck_raid = models.CharField(max_length=64)
+    ck_mac0 = models.CharField(max_length=64)
+    ck_mac1 = models.CharField(max_length=64)
+    ck_cable0 = models.CharField(max_length=64)
+    ck_cable1 = models.CharField(max_length=64)
+    ck_ilo_st = models.CharField(max_length=128)
+    ck_extend = models.CharField(max_length=256,null=True,default="")
+    class Meta:
+        unique_together = ("ck_batch","ck_sn")
+    def __unicode__(self):
+        return 'std:%s,%s' %(self.ck_batch,self.ck_sn)
+
+class PowerOnTime(models.Model):
+    '''
+开机时间
+    '''
+    pt_batch = models.CharField(max_length=64)
+    id_brand = models.ForeignKey(SpareBrandList,null=True,blank=True)
+    pt_time = models.DateTimeField(default=None)
+    id_user = models.ForeignKey(User,null=True,blank=True)
+    class Meta:
+        unique_together = ("pt_batch","id_brand")
+    def __unicode__(self):
+        return 'poweron_time:{pt_batch},{id_brand}'.format(pt_batch = self.pt_batch, id_brand = self.id_brand.brand_en)
+
+class MachineFaults(models.Model):
+    '''
+机器故障点
+    '''
+    fault_sn = models.CharField(max_length=64)
+    id_fault = models.ForeignKey(FaultList,null=True,blank=True)
+    fault_location = models.CharField(max_length=32)
+    fault_model = models.CharField(max_length=256)
+    fault_num = models.IntegerField(null=True,blank=True,default=1)
+    fault_desc = models.CharField(max_length=1024)
+    class Meta:
+        unique_together = ("fault_sn","id_fault","fault_location")
+    def __unicode__(self):
+        return 'machine_faults:{fault_sn}-{fault_en}-{fault_location}'.format(fault_sn = self.fault_sn, fault_en = self.id_fault.fault_en, fault_location = fault_location)
+

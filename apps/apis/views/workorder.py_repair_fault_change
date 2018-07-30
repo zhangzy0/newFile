@@ -1,0 +1,331 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*-
+from django.http import HttpResponse,HttpResponseRedirect
+from django.shortcuts import render_to_response,RequestContext
+from django.contrib.auth.decorators import login_required
+from apps.UserManage.views.permission import PermissionVerify
+from apps.WorkOrder.models import Process,DailyInfo,RepairInfo,StatusList,IDCList,OperList,SpareList,FaultList,ModelList,RepairInfoFault,SpareBrandList
+from apps.UserManage.models import User
+from plugins.Class.WorkOrder import SpareBrandOb,ModelOb,SpareOb,FaultOb
+from plugins.CodeGit.sms import SendSMS
+#from django.utils import simplejson
+import simplejson as json
+import datetime
+import re
+import logging
+logger = logging.getLogger('api')
+
+
+#import sys
+#reload(sys)
+#sys.setdefaultencoding('utf8')
+
+
+#@login_required
+#@PermissionVerify()
+def dailywo(request):
+    if request.method == "POST":
+        received_json_data = json.loads(request.body)
+        logger.info("参数(args):"+str(received_json_data))
+        for item in received_json_data:
+            try:
+                action = item["action"]
+                logger.info("当前操作(action):"+action)
+                if action == "close":
+                    dailywo_code = item["dailywo_code"]
+                    # 关闭日常工单
+                    try:
+                        id_st = StatusList.objects.get(id_st = 1)
+                        id_user = User.objects.get(username = 'api')
+                        flag = Process.objects.filter(id_st = id_st,pr_wocode = dailywo_code)
+                        flag2 = DailyInfo.objects.filter(dainfo_code = dailywo_code )
+                        print flag,flag2
+                        if not flag2:
+                            json_date = {'code':400,'message':'没有找到工单,请确认工单ID!','ids':[dailywo_code,]}
+                        elif flag :
+                            #防重复提交
+                            json_date = {'code':200,'message':'状态已置为完成!','ids':[dailywo_code,]}
+                        else:
+                            ob_process = Process(pr_wocode = dailywo_code,\
+                                                 id_user = id_user,\
+                                                 id_st = id_st )
+                            ob_process.save()
+                            DailyInfo.objects.filter(dainfo_code = dailywo_code ).update(id_st = id_st)
+                            json_date = {'code':200,'message':'数据保存成功!','ids':[dailywo_code,]}
+                    except Exception,ex:
+                        logger.error("Exception:"+str(ex))
+                        json_date = {'code':500,'message':'服务器端保存失败!','ids':[dailywo_code,]}
+                elif action == "get_fault":
+                    dailywo_code = item["dailywo_code"]
+                    print dailywo_code
+                    # 获取日常工单的故障类型
+                    try:
+                        iDailyInfo = DailyInfo.objects.get(dainfo_code = dailywo_code)
+                        if iDailyInfo.id_fault.all():
+                            faults = [ item.fault_cn for item in iDailyInfo.id_fault.all()]
+                            json_date = {'code':200,'message':'查询成功!','faults':faults,'ids':[dailywo_code,]}
+                        else:
+                            json_date = {'code':400,'message':'查询成功!','faults':[],'ids':[dailywo_code,]}
+                    except Exception,ex:
+                        logger.error("Exception:"+str(ex))
+                        json_date = {'code':400,'message':'没找到相关记录,请确定工单号!','ids':[dailywo_code,]}
+                elif action == "putaway":
+                    # 新日常工单（上架、搬迁）
+                    idc_en = item["dc"]
+                    dainfo_code = "API"+datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+                    id_idc = IDCList.objects.get(idc_en = idc_en)
+                    id_op = OperList.objects.get(id_op = 8) # 服务器硬件操作
+                    id_op_li = OperList.objects.get(id_op = 9) # 服务器搬迁
+                    id_user = User.objects.get(username = 'api')
+                    id_st = StatusList.objects.get(id_st = 7) #待接收
+                    dainfo_content = """
+附件为近期要搬入搬出的设备列表.<br/>
+附件表中原机架位为本机房的，为预计搬出的设备；目标机架位为本机房的，为预计搬入的设备.<br />
+请注意查看设备出入室授权，请注意核查搬入搬出设备资产信息，监管上架搬迁人员操作.<br /> 
+                    """
+                    try:
+                        ob_dailywo = DailyInfo(id_idc = id_idc,\
+                                               id_op = id_op,\
+                                               id_op_li = id_op_li,\
+                                               id_user= id_user,\
+                                               id_st = id_st,\
+                                               dainfo_code = dainfo_code,\
+                                               dainfo_affirm = True,\
+                                               dainfo_content = dainfo_content)
+                        ob_dailywo.save()
+                        #add new process startime
+                        ob_process = Process(pr_wocode = dainfo_code,\
+                                             id_user = id_user,\
+                                             id_st = id_st)
+                        ob_process.save()
+                        json_date = {'code':200,'message':'工单创建成功!','ids':[dainfo_code,]}
+                        tels = id_idc.id_user.all()
+                        tels = [item.u_mphone for item in tels]
+                        message = "日常工单:%s,工单内容:%s" %(dainfo_code,"上架")
+                        #message = "日常工单:%s,机型:%s,SN:%s,机架位:%s,工单内容:%s" %(dainfo_code,model,sn_code,rack_code,"reboot")
+                        sms_result = SendSMS(tels=tels,desc=message)
+                        logger.info("发送短信(sendsms),接收人(receivers:)"+str(tels)+",消息内容(message):"+str(message))
+                        if not sms_result_sms["code"]:
+                            logger.error("短信发送成功(sms success),url:"+sms_result["url"])
+                        else:
+                            logger.error("短信发送失败(sms fail),url:"+sms_result["url"])
+                    except Exception,ex:    
+                        logger.error("Exception:"+str(ex))
+                        json_date = {'code':500,'message':'服务器端保存失败!','ids':[dainfo_code,]}
+                elif action == "reboot":
+                    # 新日常工单（重启）
+                    idc_en = item["dc"].encode("utf-8")
+                    model = item["model"].encode("utf-8")
+                    sn_code = item["sn_code"].encode("utf-8")
+                    rack_code = item["rack_code"].encode("utf-8")
+                    iloip = item["iloip"].encode("utf-8")
+                    try:
+                        sla = item["sla"].encode("utf-8")
+                        if sla == "简单":sla = "过保"
+                    except:
+                        sla = ""
+                    dainfo_code = "API"+datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+                    id_idc = IDCList.objects.get(idc_en = idc_en)
+                    id_op = OperList.objects.get(id_op = 6) 
+                    # 服务器硬件操作
+                    id_op_li = OperList.objects.get(id_op = 6) 
+                    # 服务器搬迁
+                    id_user = User.objects.get(username = 'api')
+                    id_st = StatusList.objects.get(id_st = 7) 
+                    #待接收
+                    dainfo_content = """ 
+<table class="table table-hover table-striped  table-bordered table-condensed">
+<tr><td>序列号</td><td>机型</td><td>机架位</td><td>维保状态</td></tr>
+<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>
+</table>""" %(sn_code,model,rack_code,sla)
+                    if sla == "过保":
+                        dainfo_content = dainfo_content +"""
+1.接显示器查看机器状态，屏幕拍照并发到工单附件中.<br />
+2.进行重启到login操作，将结果反馈到工单、QQ."""
+                    else:
+                        dainfo_content = dainfo_content +"""
+1.接显示器查看机器状态，屏幕拍照并发到工单附件中.<br />
+2.排查机器是否存在故障，如有明显硬件故障工单中写明并QQ反馈.<br />
+3.如无明显硬件故障，进行重启到login操作，反馈结果到工单、QQ """
+                    try:
+                        ob_dailywo = DailyInfo(id_idc = id_idc,\
+                                               id_op = id_op,\
+                                               id_op_li = id_op_li,\
+                                               id_user= id_user,\
+                                               id_st = id_st,\
+                                               dainfo_code = dainfo_code,\
+                                               dainfo_affirm = False,\
+                                               dainfo_content = dainfo_content)
+                        ob_dailywo.save()
+                        #add new process startime
+                        ob_process = Process(pr_wocode = dainfo_code,\
+                                             id_user = id_user,\
+                                             id_st = id_st)
+                        ob_process.save()
+                        tels = id_idc.id_user.all()
+                        tels = [item.u_mphone for item in tels]
+                        model = "-".join(model.split())
+                        message = "日常工单:%s,机型:%s,SN:%s,机架位:%s,iloip:%s,工单内容:%s" %(dainfo_code,model,sn_code,rack_code,iloip,"reboot")
+                        sms_result = SendSMS(tels=tels,desc=message)
+                        logger.info("发送短信(sendsms),接收人(receivers:)"+str(tels)+",消息内容(message):"+str(message))
+                        if not sms_result["code"]:
+                            logger.error("短信发送成功(sms success),url:"+sms_result["url"])
+                        else:
+                            logger.error("短信发送失败(sms fail),url:"+sms_result["url"])
+                        json_date = {'code':200,'message':'工单创建成功!','ids':[dainfo_code,]}
+                    except Exception,ex:    
+                        logger.error("Exception:"+str(ex))
+                        json_date = {'code':500,'message':'服务器端保存失败!','ids':[dainfo_code,]}
+                else:
+                    json_date = {'code':400,'message':'没有获取到支持的操作类型!','ids':[]}
+            except Exception,ex:
+                logger.error("Exception:"+str(ex))
+                # 参数有误
+                json_date = {'code':400,'message':'提供的参数不完整!','ids':[]}
+    else:
+        # 没有提供参数
+        json_date = {'code':400,'message':'没有提供参数!','ids':[]}
+    logger.info("操作结果(result):"+str(json.dumps(json_date)))
+    return HttpResponse(json.dumps(json_date,ensure_ascii = False)) 
+
+#@login_required
+#@PermissionVerify()
+def repairwo(request):
+    if request.method == "POST":
+        received_json_data = json.loads(request.body)
+        logger.info("参数(args):"+str(received_json_data))
+        for item in received_json_data:
+            try:
+                action = item["action"]
+                if action == "close":
+                    repairwo_code = item["repairwo_code"]
+                    # 关闭报修工单
+                    try:
+                        id_st = StatusList.objects.get(id_st = 1)
+                        id_user = User.objects.get(username = 'api')
+                        flag = Process.objects.filter(id_st = id_st,pr_wocode = repairwo_code)
+                        flag2 = RepairInfo.objects.filter(reinfo_code = repairwo_code)
+                        if not flag2:
+                            json_date = {'code':400,'message':'没有找到工单,请确认工单ID!','ids':[repairwo_code,]}
+                        elif flag:
+                            #防重复提交
+                            json_date = {'code':200,'message':'状态已置为完成!','ids':[repairwo_code,]}
+                        else:
+                            ob_process = Process(pr_wocode = repairwo_code,\
+                                                 id_user = id_user,\
+                                                 id_st = id_st )
+                            ob_process.save()
+                            RepairInfo.objects.filter(reinfo_code = repairwo_code ).update(id_st = id_st)
+                            json_date = {'code':200,'message':'数据保存成功!','ids':[repairwo_code,]}
+                    except Exception,ex:
+                        logger.error("Exception:"+str(ex))
+                        json_date = {'code':500,'message':'服务器端保存失败!','ids':[repairwo_code,]}
+                elif action == "new":
+                    # 新报修工单
+                    # 添加故障相关数据
+                    idc_en = item["dc"]
+                    full_model = item["model"]
+                    brand = re.search(r"(\w+)\s", item["model"].encode("utf-8")).group().strip()
+                    #brand = item["model"].split()[0]
+                    model = re.sub(r'^\w+\s*', '', item["model"].encode("utf-8")) 
+                    try:
+                        id_brand = SpareBrandList.objects.get(brand_en = brand)
+                    except Exception,ex:
+                        logger.error("Exception:"+str(ex))
+                        logger.info("插入新备件厂商(insert new brand)"+str(brand))
+                        brand_en = brand
+                        brand_cn = brand
+                        ob_sparebrand = SpareBrandOb()
+                        ob_sparebrand.new(brand_en,brand_cn)
+                        id_brand = SpareBrandList.objects.get(brand_en = brand)
+                    try: 
+                        id_model = ModelList.objects.get(model_en = model,id_brand = id_brand)
+                    except Exception,ex:
+                        logger.error("Exception:"+str(ex))
+                        logger.info("插入新机型(insert new model)"+str(model))
+                        model_en = model
+                        model_cn = model
+                        ob_model = ModelOb()
+                        ob_model.new(model_en,model_cn,id_brand) 
+                        id_model = ModelList.objects.get(model_en = model,id_brand = id_brand)
+                    re_sn = item["sn_code"]
+                    re_rock = item["rack_code"]
+                    submitted = item["submitted"]
+                    fault_type = item["fault_type"] #故障列表
+                    spare_type = item["spare_type"] #备件列表
+                    fault_num = item["fault_num"] #故障数量列表
+                    re_content = item["fault_desc"] 
+                    reinfo_code = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+                    id_idc = IDCList.objects.get(idc_en = idc_en)
+                    id_user = User.objects.get(username = 'api')
+                    id_st = StatusList.objects.get(id_st = 7) #待接收
+                    try:
+                        ob_repairwo = RepairInfo(id_idc = id_idc,\
+                                               id_user= id_user,\
+                                               id_st = id_st,\
+                                               id_model = id_model,\
+                                               re_rock = re_rock,\
+                                               re_sn = re_sn,\
+                                               reinfo_code = reinfo_code,\
+                                               re_submitted = submitted,\
+                                               re_content = re_content)
+                        ob_repairwo.save()
+                        #add new process startime
+                        ob_process = Process(pr_wocode = reinfo_code,\
+                                             id_user = id_user,\
+                                             id_st = id_st)
+                        ob_process.save()
+                        iRepairInfo = RepairInfo.objects.get(reinfo_code = reinfo_code)
+                        print len(fault_num)
+                        for i in xrange(len(fault_num)):
+                            try:
+                                id_fault = FaultList.objects.get(fault_en = fault_type[i])
+                            except Exception,ex:
+                                logger.error("Exception:"+str(ex))
+                                logger.info("插入新故障类型(insert new fault)"+str(fault_type[i]))
+                                fault_en = fault_type[i]
+                                fault_cn = fault_type[i]
+                                ob_fault = FaultOb()
+                                logger.info('xxx')
+                                ob_fault.new(fault_en ,fault_cn)
+                                id_fault = FaultList.objects.get(fault_en = fault_type[i])
+                                logger.info("插入新故障类型(insert new fault finish)")
+                            try:
+                                id_spare = SpareList.objects.get(spare_en = spare_type[i],id_brand = id_brand)
+                            except Exception,ex:
+                                logger.error("Exception:"+str(ex))
+                                logger.info("插入新备件类型(insert new spare)"+str(spare_type[i]))
+                                spare_en = spare_type[i]
+                                spare_cn = spare_type[i]
+                                ob_spare = SpareOb()
+                                ob_spare.new(spare_en,spare_cn,id_brand) 
+                                id_spare = SpareList.objects.get(spare_en = spare_type[i],id_brand = id_brand)
+                            bad_num = fault_num[i]
+                            ob_repairfault = RepairInfoFault(id_reinfo=iRepairInfo,id_fault=id_fault,id_spare=id_spare,refault_num=bad_num)
+                            ob_repairfault.save()
+                        json_date = {'code':200,'message':'工单创建成功!','ids':[reinfo_code,]}
+                        iRepairInfo = RepairInfo.objects.get(reinfo_code = reinfo_code)
+                        tels = id_idc.id_user.all()
+                        tels = [item.u_mphone for item in tels]
+                        message = "报修工单:%s,机型:%s,SN:%s,机架位:%s" %(reinfo_code,'-'.join(full_model.split()),iRepairInfo.re_sn,iRepairInfo.re_rock)
+                        sms_result = SendSMS(tels=tels,desc=message)
+                        logger.info("发送短信(sendsms),接收人(receivers:)"+str(tels)+",消息内容(message):"+str(message))
+                        if not sms_result["code"]:
+                            logger.error("短信发送成功(sms success),url:"+sms_result["url"])
+                        else:
+                            logger.error("短信发送失败(sms fail),url:"+sms_result["url"])
+                            
+                    except Exception,ex:    
+                        logger.error("Exception:"+str(ex))
+                        json_date = {'code':500,'message':'服务器端保存失败!','ids':[reinfo_code,]}
+                else:
+                    json_date = {'code':400,'message':'没有获取到支持的操作类型!','ids':[]}
+            except Exception,ex:
+                logger.error("Exception:"+str(ex))
+                # 参数有误
+                json_date = {'code':400,'message':'提供的参数不完整或类型值不对!'}
+    else:
+        # 没有提供参数
+        json_date = {'code':400,'message':'没有参数!','ids':[]}
+    logger.info("操作结果(result):"+str(json.dumps(json_date)))
+    return HttpResponse(json.dumps(json_date,ensure_ascii = False)) 

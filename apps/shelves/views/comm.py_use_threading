@@ -1,0 +1,909 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+from django.http import HttpResponse
+from django.shortcuts import render_to_response, RequestContext
+from django.db.models import Q
+from django.db.models.query import QuerySet
+from apps.usermanage.views.permission import PermissionVerify
+from apps.usermanage.views.permission import login_required
+from apps.workorder.models import IDCList, SpareBrandList, ModelList, FaultList
+from apps.shelves.models import CheckCount, StandardData, CheckFailData, PowerOnTime
+from plugins.myclass.shelves_models import StandardDataOb, CheckFailDataOb
+from plugins.codegit.django_db_oper import queryDB, updateDB
+from plugins.apps.shelves import std_db2dic, fac_json2dic
+from datetime import date
+import requests
+import sys
+import json
+import re
+import time
+import datetime
+import logging
+import threading
+reload(sys)
+sys.setdefaultencoding('utf8')
+logger = logging.getLogger('shelves')
+
+
+def check_data(sn, fac_item,std_item,cur_std_items):
+    t_result = {}
+    brand = std_item["model"].split(' ')[0]
+    t_result["sn"] = sn 
+    t_result["rack_id"] = std_item["rack_id"]
+    t_result["idc"] = std_item["idc"]
+    t_result["model"] = std_item["model"]
+    model_en = ' '.join(std_item["model"].split(' ')[1:])
+    id_model = ModelList.objects.get(model_en = model_en)
+    rack_id = std_item["rack_id"]
+    t_result["stat"] = "ok"
+    t_result["entity_id"] = std_item["entity_id"]
+    cur_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+    sql = "update shelves_standarddata set std_check_ok = 2,std_update = '{std_update}' where std_sn = '{std_sn}'".format(std_sn = sn, std_update = cur_time)
+    updateDB(sql)
+    sql = "select ck_sn from shelves_checkfaildata where ck_sn = '{ck_sn}'".format(ck_sn = sn)
+    flag,result = queryDB(sql)
+    if result:
+        ck_data_exist = True
+    else:
+        ck_data_exist = False
+    # add
+    StandardData.objects.filter(std_sn = sn).update(std_bios_v = "{std_bios_v}".format(std_bios_v = fac_item["bios_v"]))
+    if std_item["bios_v"] == fac_item["bios_v"]:
+        t_result["bios_v"] = fac_item["bios_v"]
+    else:
+        t_result["bios_v"] = "{std_bios_v}<font color='red'> ({real_bios_v})</font>".format(std_bios_v = std_item["bios_v"], real_bios_v = fac_item["bios_v"])
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_bios_v = t_result["bios_v"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_bios_v = t_result["bios_v"])
+
+    if std_item["cpu"] == fac_item["cpu"]:
+        t_result["cpu"] = std_item["cpu"]
+    else:
+        t_result["cpu"] = "{std_cpu}<font color='red'> ({real_cpu})</font>".format(std_cpu = std_item["cpu"], real_cpu = fac_item["cpu"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_cpu = t_result["cpu"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_cpu = t_result["cpu"])
+    # mem
+    std_mems = std_item["mem"].split('+')
+    std_mems = [ x.split('-')[-1] for x in std_mems]
+    std_mem = '+'.join(std_mems)
+    if std_mem == fac_item["mem"]:
+        t_result["mem"] = std_item["mem"]
+    else:
+        t_result["mem"] = "{std_mem}<font color='red'> ({real_mem})</font>".format(std_mem = std_mem, real_mem = fac_item["mem"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_mem = t_result["mem"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_mem = t_result["mem"])
+
+    # disk
+    std_disks = std_item["disk"].split('+')
+    std_disks_dic = {}
+    for disk_item in std_disks:
+        type = "-".join(disk_item.split('*')[0].split('-')[1:])
+        num = disk_item.split('*')[1]
+        std_disks_dic[type] = int(num)
+    if std_disks_dic == fac_item["disk"]:
+        t_result["disk"] = std_item["disk"]
+    else:
+        real_disk = ""
+        for iitem in fac_item["disk"]:
+            if iitem.split('-')[0] == "SSD" or iitem.split('-')[0] == "NVME":
+                ibrand = "Intel"
+            else:
+                ibrand = brand
+            disk_str = "{brand}-{type}*{num}".format(brand = ibrand, type = iitem, num = fac_item["disk"][iitem])
+            if real_disk:
+                real_disk = "{real_disk}+{disk_str}".format(real_disk = real_disk, disk_str = disk_str)
+            else:
+                real_disk = disk_str
+        t_result["disk"] = "{std_disk}<font color='red'> ({real_disk})</font>".format(std_disk = std_item["disk"], real_disk = real_disk)
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_disk = t_result["disk"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_disk = t_result["disk"])
+
+    # extend
+    std_extends = std_item["extend"].split('+')
+    std_extends_dic = {}
+    try:
+        for extend_item in std_extends:
+            type = extend_item.split('*')[0]
+            num = extend_item.split('*')[1]
+            std_extends_dic[type] = int(num)
+    except Exception, ex:
+        pass
+        #print 'extend error'
+    if std_extends_dic == fac_item["extend"]:
+        t_result["extend"] = std_item["extend"]
+    else:
+        real_extends = fac_item["extend"]
+        t_result["extend"] = "{std_extends}<font color='red'> ({real_extends})</font>".format(std_extends = std_item["extend"], real_extends = real_extends)
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_extend = t_result["extend"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_extend = t_result["extend"])
+
+    # netcard
+    std_nics = std_item["netcard"].split('+')
+    std_nics_dic = {}
+    for nic_sn in std_nics:
+        type = nic_sn.split('*')[0]
+        num = nic_sn.split('*')[1]
+        std_nics_dic[type] = int(num)
+    if std_nics_dic == fac_item["netcard"]:
+        t_result["netcard"] = std_item["netcard"]
+    else:
+        real_nic = ""
+        for iitem in fac_item["netcard"]:
+            if real_nic: 
+                real_nic = "{real_nic}+{type}*{num}".format(real_nic = real_nic, type = iitem, num = fac_item["netcard"][iitem])
+            else:
+                real_nic = "{type}*{num}".format(type = iitem, num = fac_item["netcard"][iitem])
+        t_result["netcard"] = "{std_nic}<font color='red'> ({real_nic})</font>".format(std_nic = std_item["netcard"], real_nic = real_nic)
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_nic = t_result["netcard"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_nic = t_result["netcard"])
+
+    # power
+    std_num = std_item["power"].split('*')[1]
+    if std_num == fac_item["power"]:
+        t_result["power"] = std_item["power"]
+    else:
+        t_result["power"] = "{std_power}<font color='red'> ({real_power})</font>".format(std_power = std_item["power"], real_power = fac_item["power"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_power = t_result["power"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_power = t_result["power"])
+
+    # ilo_ip
+    t_result["ilo_ip"] = std_item["ilo_ip"]
+
+    # cable0,cable1
+    cur_timestamp = int(time.time())
+    flag,result = queryDB(sql)
+    if std_item["cable0"] == fac_item["cable0"]:
+        t_result["cable0"] = std_item["cable0"]
+    else:
+        t_result["cable0"] = "{std_cable0}<font color='red'> ({real_cable0})</font>".format(std_cable0 = std_item["cable0"], real_cable0 = fac_item["cable0"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        # if std_item["cable0_time"] is not None and std_item["cable0_time"]:
+        # if std_item["std_start"] is not None and std_item["std_start"]:
+        # print 'mmmmmmmm',std_item["std_start"],sn
+        if std_item["std_start"]:
+            timeArray = time.strptime(str(std_item["std_start"]), "%Y-%m-%d %H:%M:%S")
+            start_timestamp = timeStamp = int(time.mktime(timeArray))
+            if cur_timestamp - start_timestamp > 360:# >=6 mins
+                if not ck_data_exist:
+                    flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+                    if flag is True:
+                        ck_data_exist = True
+                        logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                        CheckFailData.objects.filter(ck_sn = sn).update(ck_cable0 = t_result["cable0"])
+                    else:
+                        logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+                else:
+                    CheckFailData.objects.filter(ck_sn = sn).update(ck_cable0 = t_result["cable0"])
+        else:
+            sql = "update shelves_standarddata set std_start = '{std_start}' where std_sn = '{std_sn}'".format(std_start = cur_time,std_sn = sn)
+    if std_item["cable1"] == fac_item["cable1"]:
+        t_result["cable1"] = std_item["cable1"]
+    else:
+        t_result["cable1"] = "{std_cable1}<font color='red'> ({real_cable1})</font>".format(std_cable1 = std_item["cable1"], real_cable1 = fac_item["cable1"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        #if std_item["cable1_time"] is not None and std_item["cable0_time"]:
+        #    if cur_time - std_item["cable1_time"] > 360:
+        #if std_item["std_start"] is not None and std_item["std_start"]:
+        print 'xxxxxxx',std_item["std_start"]
+        if std_item["std_start"]:
+            timeArray = time.strptime(str(std_item["std_start"]), "%Y-%m-%d %H:%M:%S")
+            start_timestamp = timeStamp = int(time.mktime(timeArray))
+            if cur_timestamp - start_timestamp > 360:# >=6 mins
+            #if cur_timestamp - std_item["std_start"] > 360:# >=6 mins
+                if not ck_data_exist:
+                    flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+                    if flag is True:
+                        ck_data_exist = True
+                        logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                        CheckFailData.objects.filter(ck_sn = sn).update(ck_cable1 = t_result["cable1"])
+                    else:
+                        logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+                else:
+                    CheckFailData.objects.filter(ck_sn = sn).update(ck_cable1 = t_result["cable1"])
+        else:
+            #sql = "update shelves_standarddata set std_cable1_time = '{std_cable1_time}' where std_sn = '{std_sn}'".format(std_cable1_time = cur_time,std_sn = sn)
+            sql = "update shelves_standarddata set std_start = '{std_start}' where std_sn = '{std_sn}'".format(std_start = cur_time,std_sn = sn)
+            updateDB(sql)
+
+    # eth0 mac, eth1 mac
+    if std_item["mac0"] == fac_item["mac0"]:
+        t_result["mac0"] = std_item["mac0"]
+    else:
+        t_result["mac0"] = "{std_mac0}<font color='red'> ({real_mac0})</font>".format(std_mac0 = std_item["mac0"], real_mac0 = fac_item["mac0"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        #ck_mac0 = "{std_mem}<font color='red'> ({real_mem})</font>".format(std_mem =std_item["mem"], real_mem = fac_item["mem"])
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                #sql = "update shelves_checkfaildata set ck_mac0 = '{ck_mac0}' where std_sn = '{std_sn}'".format(ck_mac0 = ck_mac0, std_sn = sn)
+                #updateDB(sql)
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_mac0 = t_result["mac0"])
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_mac0 = t_result["mac0"])
+            #sql = "update shelves_checkfaildata set ck_mac0 = '{ck_mac0}' where std_sn = '{std_sn}'".format(ck_mac0 = ck_mac0, std_sn = sn)
+            #updateDB(sql)
+    if std_item["mac1"] == fac_item["mac1"]:
+        t_result["mac1"] = std_item["mac1"]
+    else:
+        t_result["mac1"] = "{std_mac1}<font color='red'> ({real_mac1})</font>".format(std_mac1 = std_item["mac1"], real_mac1 = fac_item["mac1"])
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                CheckFailData.objects.filter(ck_sn = sn).update(ck_mac1 = t_result["mac1"])
+                #sql = "update shelves_checkfaildata set ck_mac1 = '{ck_mac1}' where std_sn = '{std_sn}'".format(ck_mac1 = t_result["mac1"], std_sn = sn)
+                #updateDB(sql)
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            CheckFailData.objects.filter(ck_sn = sn).update(ck_mac1 = t_result["mac1"])
+            #sql = "update shelves_checkfaildata set ck_mac1 = '{ck_mac1}' where std_sn = '{std_sn}'".format(ck_mac1 = t_result["mac1"], std_sn = sn)
+            #updateDB(sql)
+
+    t_result["ilo_stat"] = fac_item["ilo_stat"]
+    if t_result["ilo_stat"] == "ok":
+        t_result["ilo_stat"] = "ok"
+        if sn in cur_std_items:
+            t_result["installed"] = 0
+        else:
+            t_result["installed"] = 0
+    else:
+        t_result["ilo_stat"] = "error"
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        ck_ilo_st = "{std_ilo_stat}<font color='red'> ({real_ilo_stat})</font>".format(std_ilo_stat = std_item["ilo_stat"], real_ilo_stat = fac_item["ilo_stat"])
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                sql = "update shelves_checkfaildata set ck_ilo_st = '{ck_ilo_st}' where std_sn = '{std_sn}'".format(ck_ilo_st = ck_ilo_st, std_sn = sn)
+                updateDB(sql)
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            sql = "update shelves_checkfaildata set ck_ilo_st = '{ck_ilo_st}' where std_sn = '{std_sn}'".format(ck_ilo_st = ck_ilo_st, std_sn = sn)
+            updateDB(sql)
+     
+    t_result["create_raid"] = fac_item["create_raid"]
+    if t_result["create_raid"] == "fail":
+        t_result["stat"] = "fail"
+        sql = "update shelves_standarddata set std_check_ok = 2 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        ck_raid = "{std_raid}<font color='red'> ({real_raid})</font>".format(std_raid =std_item["create_raid"], real_raid = "fail")
+        if not ck_data_exist:
+            flag, desc = CheckFailDataOb().new(ck_sn = sn, ck_batch = std_item["batch"], ck_rack_id = rack_id, id_model = id_model)
+            if flag is True:
+                ck_data_exist = True
+                logger.info("StandardData:(StandardData_success):%s\nDetail:%s" %(sn,desc))
+                sql = "update shelves_checkfaildata set ck_raid = '{ck_raid}' where std_sn = '{std_sn}'".format(ck_raid = ck_raid, std_sn = sn)
+                updateDB(sql)
+            else:
+                logger.error("StandardData:(StandardData_fail):%s\nError Log:%s" %(sn,desc))
+        else:
+            sql = "update shelves_checkfaildata set ck_raid = '{ck_raid}' where std_sn = '{std_sn}'".format(ck_raid = ck_raid, std_sn = sn)
+            updateDB(sql)
+    return t_result
+
+def resultCount(batch,idc,brand,st):
+    global result_count
+    if batch not in result_count.keys():
+        result_count[batch] = {}
+        result_count[batch]["idc_count"] = {}
+        result_count[batch]["brand_count"] = {}
+    if idc not in result_count[batch]["idc_count"].keys():
+        result_count[batch]["idc_count"][idc] = {}
+        result_count[batch]["idc_count"][idc]["sum"] = 0
+        result_count[batch]["idc_count"][idc]["ok"] = 0
+        result_count[batch]["idc_count"][idc]["fail"] = 0
+    if brand not in result_count[batch]["brand_count"].keys():
+        result_count[batch]["brand_count"][brand] = {}
+        result_count[batch]["brand_count"][brand]["sum"] = 0
+        result_count[batch]["brand_count"][brand]["ok"] = 0
+        result_count[batch]["brand_count"][brand]["fail"] = 0
+    result_count[batch]["idc_count"][idc]["sum"] += 1
+    result_count[batch]["brand_count"][brand]["sum"] += 1
+    if st == "fail":
+        result_count[batch]["idc_count"][idc]["fail"] += 1
+        result_count[batch]["brand_count"][brand]["fail"] += 1
+    else:
+        result_count[batch]["idc_count"][idc]["ok"] += 1
+        result_count[batch]["brand_count"][brand]["ok"] += 1
+    return result_count
+
+def dataCount(t_result, batch, st):
+    global result_count
+    t_result = {t_result["sn"]:t_result}
+    if batch not in data_count.keys():
+        data_count[batch] = {}
+        data_count[batch]["nodata"] = {}
+        data_count[batch]["ok"] = {}
+        data_count[batch]["fail"] = {}
+    if st == "nodata":
+        data_count[batch]["nodata"] = dict( data_count[batch]["nodata"], **t_result )
+    elif st == "ok":
+        data_count[batch]["ok"] = dict( data_count[batch]["ok"], **t_result )
+    else:
+        data_count[batch]["fail"] = dict( data_count[batch]["fail"], **t_result )
+    return data_count
+
+
+def get_all_result_check(fac_item, std_item, sn, batch, idc, brand, cur_std_items):
+    global all_length
+    t_result = each_count(fac_item, std_item, sn, batch, idc, brand, cur_std_items)
+    dataCount(t_result, batch, t_result["stat"])
+    all_length -= 1
+
+def get_all_result_fin(t_result, batch, idc, brand, st):
+    global all_length
+    if st !="ok": st2 = "fail"
+    else:  st2 = st
+    resultCount(batch, idc, brand, st2)
+    dataCount(t_result, batch, st)
+    all_length -= 1
+
+def each_count(fac_item, std_item, sn, batch, idc, brand, cur_std_items):
+    t_result = check_data(sn, fac_item, std_item, cur_std_items) 
+    #t_result = {"stat":"ok"}
+    if t_result["stat"] == "ok":
+        if not std_item["real_exist"]:
+        # update db, onetime_pass = True
+            sql = "update shelves_standarddata set std_onetime_pass = 1 where std_sn = '{std_sn}'".format(std_sn = sn)
+            updateDB(sql)
+        # update db,check_status = True
+        sql = "update shelves_standarddata set std_check_ok = 1 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        # update db,realdata_status = True
+        sql = "update shelves_standarddata set std_real_exist = 1 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        resultCount(batch, idc, brand,"ok")
+    else:
+        # update db,realdata_status = True
+        sql = "update shelves_standarddata set std_real_exist = 1 where std_sn = '{std_sn}'".format(std_sn = sn)
+        updateDB(sql)
+        resultCount(batch, idc, brand,"fail")
+    return t_result
+
+def shelvesCheckOK(request):
+    today = datetime.date.today()
+    idate = str(today - datetime.timedelta(days=1))
+    year = int(idate.split('-')[0])
+    month = int(idate.split('-')[1])
+    day = int(idate.split('-')[2])
+    result = StandardData.objects.filter(
+        std_check_ok=1, std_update__gt=date(year, month, day))
+    response_data = {}
+    for item in result:
+        response_data[item.std_sn] = item.std_check_ok
+
+    kwvars = {
+        'request': request,
+        'title': '工单系统-基础信息-机房信息列表',
+        'body': '1',
+    }
+    return HttpResponse(
+        json.dumps(response_data), content_type="application/json")
+
+
+@login_required()
+@PermissionVerify()
+def shelvesHelp(request):
+    kwvars = {
+        'request': request,
+        'title': '上架验收-帮助',
+    }
+    return render_to_response('shelves/help.html', kwvars,
+                              RequestContext(request))
+
+
+@login_required()
+@PermissionVerify()
+def shelvesHome2(request):
+    url = "http://10.134.35.53/api/web.php?batch=purchase-{year_month}".format(
+        year_month="2016-10")
+    body = requests.get(url)
+    kwvars = {
+        'request': request,
+        'body': body.text,
+        'title': '工单系统-基础信息-机房信息列表',
+    }
+    return render_to_response('shelves/index2.html', kwvars,
+                              RequestContext(request))
+
+
+def get_batch_brand(username):
+    id_brand = SpareBrandList.objects.get(brand_en="Lenovo")
+    if username == "surecoteam":
+        # brand_en = Lenovo
+        query = StandardData.objects.filter(id_brand=id_brand).query
+    elif username == "dcitsteam":
+        # brand_en = Dell and so on
+        query = StandardData.objects.exclude(id_brand=id_brand).query
+    else:
+        query = StandardData.objects.all().query
+    query.group_by = ['std_batch', 'id_brand_id']
+    batch_brand = QuerySet(query=query, model=StandardData)
+    return batch_brand
+
+
+def get_power_on_list(username):
+    id_brand = SpareBrandList.objects.get(brand_en="Lenovo")
+    if username == "surecoteam":
+        # brand_en = Lenovo
+        query = PowerOnTime.objects.filter(id_brand=id_brand)
+    elif username == "dcitsteam":
+        # brand_en = Dell and so on
+        query = PowerOnTime.objects.exclude(id_brand=id_brand)
+    else:
+        query = PowerOnTime.objects.all()
+    return query
+
+
+def check_poweron(id_user):
+    batch_brand = get_batch_brand(id_user.username)
+    power_on = get_power_on_list(id_user.username)
+    if len(batch_brand) == len(power_on):
+        power_on_status = True
+    else:
+        power_on_status = False
+    return power_on_status
+
+
+@login_required()
+@PermissionVerify()
+def shelvesHome(request):
+    start = time.time()
+    logger.error("start")
+    action = request.GET.get("action")
+    role = request.user.role.role_en
+    username = request.user.username
+    idcs = request.POST.getlist("idc")
+    brands = request.POST.getlist("brand")
+    models = request.POST.getlist("model")
+    allidcs = IDCList.objects.filter(idc_enable=True)
+    allbrands = SpareBrandList.objects.filter(brand_enable=True).exclude(
+        brand_en="sureco").exclude(brand_en="shenma")
+    imonth = time.strftime("%Y-%m", time.localtime(time.time()))
+    imonth = "2016-11"
+    idate = time.strftime("%Y-%m-%d", time.localtime(time.time()))
+    year = int(idate.split('-')[0])
+    month = int(idate.split('-')[1])
+    day = int(idate.split('-')[2])
+    cab_api = "http://10.136.130.232/net/info"
+    fac_api = "http://10.142.113.58/check/purchase/index.php?act=data&p=purchase-{imonth}".format(
+        imonth=imonth)
+    std_api = "http://roc.sogou/pandora/srv_online/loadInterfaceShelvesCheck?type=purchase"
+    global result_count, data_count, all_length
+    result_count = {}
+    data_count = {}
+    print time.time() - start, 'end init'
+    try:
+        cab_str = requests.request('GET', cab_api).text
+        cab = json.loads(cab_str)
+    except Exception, ex:
+        print 'cab_str:', ex
+        cab_str = "{}"
+        cab = json.loads(cab_str)
+    print time.time() - start, 'end get cab'
+    try:
+        fac_str = requests.request('GET', fac_api).text
+        fac_json = json.loads(fac_str)
+        # add
+        # fac_fp = open("./data/fac20161031.txt","r")
+        # lines = fac_fp.readlines()[0]
+        # fac_json = json.loads(lines)
+        if str(fac_json) == "f":
+            print 'error'
+            raise TypeError
+    except Exception, ex:
+        print 'fac_str:', ex
+        fac_str = "{}"
+        fac_json = json.loads(fac_str)
+    print time.time() - start, 'end get fac_json'
+
+    fac = {}
+    if fac_json:
+        # print fac_json
+        for item in fac_json.values():
+            t_fac = fac_json2dic(item=item, cab=cab)
+            sn = json.loads(item)["s"]
+            fac[sn] = t_fac
+    print time.time() - start, 'end fac_json to fac_dic'
+    # get std from db
+    std_db = StandardData.objects.filter(std_date=idate)
+    print time.time() - start, 'end get data from db'
+    # if std_db not exist, get from url and insert to db
+    std_str = requests.request('GET', std_api).text
+    std_json = json.loads(std_str)
+    print time.time() - start, 'end get data from std_api'
+    # add
+    # std_fp = open("./docs/data/shelves/std20161031.txt","r")
+    # lines = std_fp.readlines()[0]
+    # std_json = json.loads(lines)
+    cur_std_items = [item for item in std_json]
+    cur_std_model = [std_json[item]["machine_type"] for item in std_json]
+    allmodels = {}
+    for model in cur_std_model:
+        if model not in allmodels:
+            allmodels[model] = ' '.join(model.split(' ')[1:])
+    if not std_db or action == "update":
+        std = {}
+        try:
+            # std_fp = open("std.txt","r")
+            # std_fp = open("./docs/data/shelves/std20161031.txt","r")
+            # std_fp = open("./data/std20161031.txt","r")
+            # lines = std_fp.readlines()[0]
+            # std_json = json.loads(lines)
+            for item in std_json:
+                std_sn = item
+                batch = std_json[item]["batch"]
+                rack_id = std_json[item]["rack_id"]
+                # mem
+                std_mems = std_json[item]["mem"].split('+')
+                std_mems = [
+                    x.split('-')[-2] + "*" + x.split('*')[-1] for x in std_mems
+                ]
+                mem = '+'.join(std_mems)
+                # cpu
+                cpu = std_json[item]["cpu"]
+                # disk
+                disk = std_json[item]["disk"]
+                netcard = std_json[item]["netcard"]
+                extend = std_json[item]["extend"]
+                if extend == "N/A":
+                    extend = "NA"
+                nic_speed = "speed"
+                power = std_json[item]["power"]
+                # ilo_ip,cable0,cable1
+                for ip_item in std_json[item]["ip_detail"]:
+                    if ip_item["eth"] == "ethilo":
+                        std_ilo = ip_item["ip"]
+                    elif ip_item["eth"] == "eth0":
+                        std_cable0 = ip_item["cable_id"]
+                    elif ip_item["eth"] == "eth1":
+                        std_cable1 = ip_item["cable_id"]
+                try:
+                    ilo_ip = std_ilo
+                except Exception, ex:
+                    ilo_ip = ""
+                try:
+                    cable0 = std_cable0
+                except Exception, ex:
+                    cable0 = ""
+                try:
+                    cable1 = std_cable1
+                except Exception, ex:
+                    cable1 = ""
+                mac0 = std_json[item]["mac"]["eth0"]
+                mac1 = std_json[item]["mac"]["eth1"]
+                flag = StandardData.objects.filter(std_sn=std_sn)
+                model_en = ' '.join(std_json[item]["machine_type"].split(' ')[1:])
+                id_model = ModelList.objects.get(model_en=model_en)
+                idc_en = std_json[item]["idc"]
+                id_idc = IDCList.objects.get(idc_en=idc_en)
+                if flag:
+                    flag, desc = StandardDataOb().upall(
+                        std_sn=std_sn,
+                        id_idc=id_idc,
+                        id_model=id_model,
+                        std_rack_id=rack_id,
+                        std_ilo_ip=ilo_ip,
+                        std_cpu=cpu,
+                        std_mem=mem,
+                        std_disk=disk,
+                        std_nic=netcard,
+                        std_nic_speed=nic_speed,
+                        std_extend=extend,
+                        std_power=power,
+                        std_mac0=mac0,
+                        std_mac1=mac1,
+                        std_cable0=cable0,
+                        std_cable1=cable1)
+                else:
+                    flag, desc = StandardDataOb().new(std_sn=std_sn,
+                                                      std_batch=batch,
+                                                      id_idc=id_idc,
+                                                      id_model=id_model,
+                                                      std_rack_id=rack_id,
+                                                      std_ilo_ip=ilo_ip,
+                                                      std_cpu=cpu,
+                                                      std_mem=mem,
+                                                      std_disk=disk,
+                                                      std_nic=netcard,
+                                                      std_nic_speed=nic_speed,
+                                                      std_extend=extend,
+                                                      std_power=power,
+                                                      std_mac0=mac0,
+                                                      std_mac1=mac1,
+                                                      std_cable0=cable0,
+                                                      std_cable1=cable1)
+                if flag is True:
+                    logger.info("StandardData:success:[%s]%s\nDetail:%s" %
+                                (batch, std_sn, desc))
+                else:
+                    logger.error("StandardData:fail:[%s]%s\nError Log:%s" %
+                                 (batch, std_sn, desc))
+                # print time.time()-start,'end insertdata to db'
+        except Exception, ex:
+            print 'insert std_str to db:', ex
+    print time.time() - start, 'start get std from db'
+    # get std from db ( currentdate and check_fail )
+    date_sql = "select std_date from shelves_standarddata where std_check_ok in ( 0,2 ) group by std_date;"
+    flag, date_result = queryDB(date_sql)
+    if flag:
+        date_in = [item[0].strftime("%Y-%m-%d") for item in date_result]
+    else:
+        date_in = ()
+    date_in = tuple(date_in)
+    idc_in = [item.encode('utf-8') for item in idcs]
+    idc_in = tuple(idc_in)
+    # if len(idc_in) == 1:
+    #     idc_in = idc_in[0]
+    brand_in = [item.encode('utf-8') for item in brands]
+    brand_in = tuple(brand_in)
+    model_in = [item.encode('utf-8') for item in models]
+    model_in = tuple(model_in)
+    # if len(brand_in) == 1:
+    #     brand_in = brand_in[0]
+    sql_where = ""
+    if date_in:
+        if len(date_in) == 1:
+            sql_where = "{sql_where} and std.std_date = '{date_in}'".format(
+                sql_where=sql_where, date_in=date_in[0])
+        else:
+            sql_where = "{sql_where} and std.std_date in {date_in}".format(
+                sql_where=sql_where, date_in=date_in)
+    if idc_in:
+        if len(idc_in) == 1:
+            sql_where = "{sql_where} and idc.idc_en = '{idc_in}'".format(
+                sql_where=sql_where, idc_in=idc_in[0])
+        else:
+            sql_where = "{sql_where} and idc.idc_en in {idc_in}".format(
+                sql_where=sql_where, idc_in=idc_in)
+    if brand_in:
+        if len(brand_in) == 1:
+            sql_where = "{sql_where} and brand.brand_en = '{brand_in}'".format(
+                sql_where=sql_where, brand_in=brand_in[0])
+        else:
+            sql_where = "{sql_where} and brand.brand_en in {brand_in}".format(
+                sql_where=sql_where, brand_in=brand_in)
+    if model_in:
+        if len(model_in) == 1:
+            sql_where = "{sql_where} and model.model_en = '{model_in}'".format(
+                sql_where=sql_where, model_in=model_in[0])
+        else:
+            sql_where = "{sql_where} and model.model_en in {model_in}".format(
+                sql_where=sql_where, model_in=model_in)
+    if sql_where:
+        sql_where = sql_where[4:]
+    std_db_sql = """
+select std_date,std_sn,std_batch,concat(brand_en,' ',model_en),std_rack_id,
+       idc_en,std_ilo_ip,std_cpu,std_mem,std_disk,std_nic,std_nic_speed,
+       std_power,std_raid,std_mac0,std_mac1,std_cable0,std_cable1,std_ilo_st,
+       std_real_exist,std_onetime_pass,std_check_ok,std_bios_v,std_start,
+       std_entity_id,std_extend
+from shelves_standarddata std
+left join workorder_idclist idc on (std.id_idc_id = idc.id_idc)
+left join workorder_sparebrandlist brand on (std.id_brand_id = brand.id_brand)
+left join workorder_modellist model on (std.id_model_id = model.id_model)
+where {sql_where};
+""".format(sql_where=sql_where)
+    print std_db_sql
+    flag, std_db = queryDB(std_db_sql)
+    print time.time() - start, 'end get std from db'
+    std = {}
+    if flag:
+        for item in std_db:
+            std_sn = item[1]
+            t_std = std_db2dic(item=item)
+            std[std_sn] = t_std
+        print time.time() - start, 'end std_db to std_dic'
+    # get std from db ( currentdate and check_fail )
+    all_length = len(std)
+    for item in std:
+        brand = std[item]["model"].split(" ")[0]
+        idc = std[item]["idc"]
+        batch = re.sub("\.", "-", std[item]["batch"])
+        tmp_nodata = {}
+        tmp_fail = {}
+        tmp_ok = {}
+        if brand == "Lenovo" and (username == "Lenovo" or
+                                  username == "surecoteam"):
+            if std[item]["std_check_ok"] == 1:
+                # ok
+                if item in cur_std_items:
+                    std[item]["installed"] = 0
+                else:
+                    std[item]["installed"] = 1
+                threading.Thread(
+                    target = get_all_result_fin,
+                    args = (std[item], batch, idc, brand, "ok"),
+                    name = 'thread').start()
+            elif item not in fac:
+                # nodata
+                threading.Thread(
+                    target = get_all_result_fin,
+                    args = (std[item], batch, idc, brand, "nodata"),
+                    name = 'thread').start()
+            else:
+                # checking
+                if item in cur_std_items:
+                    std[item]["installed"] = 0
+                else:
+                    std[item]["installed"] = 1
+                threading.Thread(
+                    target = get_all_result_check,
+                    args = (fac[item], std[item], item, batch, idc, brand,
+                           cur_std_items),
+                    name = 'thread').start()
+        elif brand != "Lenovo" and (username == "Dell" or
+                                    username == "dcitsteam"):
+            if std[item]["std_check_ok"] == 1:
+                # ok
+                if item in cur_std_items:
+                    std[item]["installed"] = 0
+                else:
+                    std[item]["installed"] = 1
+                threading.Thread(
+                    target = get_all_result_fin,
+                    args = (std[item], batch, idc, brand, "ok"),
+                    name = 'thread').start()
+            elif item not in fac:
+                # nodata
+                threading.Thread(
+                    target = get_all_result_fin,
+                    args = (std[item], batch, idc, brand, "nodata"),
+                    name = 'thread').start()
+            else:
+                # checking
+                threading.Thread(
+                    target = get_all_result_check,
+                    args = (fac[item], std[item], item, batch, idc, brand,
+                           cur_std_items),
+                    name = 'thread').start()
+        elif role == "Admin" or role == "sogouer" or role == "shelves":
+            if std[item]["std_check_ok"] == 1:
+                # ok
+                if item in cur_std_items:
+                    std[item]["installed"] = 0
+                else:
+                    std[item]["installed"] = 1
+                threading.Thread(
+                    target = get_all_result_fin,
+                    args = (std[item], batch, idc, brand, "ok"),
+                    name = 'thread').start()
+            elif item not in fac:
+                # nodata
+                threading.Thread(
+                    target = get_all_result_fin,
+                    args = (std[item], batch, idc, brand, "nodata"),
+                    name = 'thread').start()
+            else:
+                # checking
+                print time.time() - start, 'checking'
+                threading.Thread(
+                    target = get_all_result_check,
+                    args = (fac[item], std[item], item, batch, idc, brand,
+                           cur_std_items),
+                    name = 'thread').start()
+    print time.time() - start, 'end check data'
+    print all_length,'xx'
+    while True:
+        if all_length == 0:
+            break
+    print all_length,'xx'
+    for item in result_count:
+        result_count[item]["fail_sum"] = 0
+        for iitem in result_count[item]["idc_count"]:
+            result_count[item]["fail_sum"] += result_count[item]["idc_count"][iitem]["fail"]
+            result_count[item]["idc_count"][iitem]["percent"] = result_count[item]["idc_count"][iitem]["ok"]*100/result_count[item]["idc_count"][iitem]["sum"]
+        for iitem in result_count[item]["brand_count"]:
+            result_count[item]["brand_count"][iitem]["percent"] = result_count[item]["brand_count"][iitem]["ok"]*100/result_count[item]["brand_count"][iitem]["sum"]
+    print time.time() - start, 'end count data'
+    fault_list = FaultList.objects.all()
+    # if list is NULL poweron_status is True
+    poweron_status = check_poweron(request.user)
+    kwvars = {
+        'request': request,
+        'poweron_status': poweron_status,
+        'data_count': data_count,
+        'result_count': result_count,
+        'idcs': idcs,
+        'allidcs': allidcs,
+        'models': models,
+        'allmodels': allmodels,
+        'brands': brands,
+        'allbrands': allbrands,
+        "fault_list": fault_list,
+    }
+    print time.time() - start, 'end'
+    return render_to_response('shelves/index.html', kwvars)
+

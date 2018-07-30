@@ -1,0 +1,399 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*-
+from django.http import HttpResponse,HttpResponseRedirect
+from django.shortcuts import render_to_response,RequestContext
+from django.contrib.auth.decorators import login_required
+from apps.usermanage.views.permission import PermissionVerify
+from apps.workorder.forms import IDCList
+import requests
+import sys
+import json
+import re
+import time
+import datetime
+reload(sys)
+sys.setdefaultencoding('utf8')
+
+def roc_check_ok(request):
+    kwvars = {
+        'request':request,
+        'title':'工单系统-基础信息-机房信息列表',
+        'body':'1',
+    }
+    return render_to_response('shelves/toroc.html',kwvars)
+
+@login_required
+@PermissionVerify()
+def Help(request):
+    kwvars = {
+        'request':request,
+        'title':'工单系统-基础信息-机房信息列表',
+        #'postUrl':'/workorder/idc/list/',
+    }
+    return render_to_response('shelves/help.html',kwvars)
+
+@login_required
+@PermissionVerify()
+def Home(request):
+    start = time.time()
+    role = request.user.role.role_en
+    #role = "brand"
+    username = request.user.username
+    #username = "Dell"
+    idcs = request.POST.getlist("idc")
+    allidcs = IDCList.objects.filter(idc_enable = True )
+    idate = time.strftime("%Y-%m",time.localtime(time.time()))
+    #cab_api="http://10.134.106.219/net/info"
+    cab_api="http://10.136.130.232/net/info"
+    fac_api="http://10.142.113.58/check/purchase/index.php?act=data&p=purchase-{idate}".format(idate = idate)
+    std_api="http://roc.sogou/pandora/srv_online/loadInterfaceShelvesCheck?type=purchase"
+    try:
+        cab_str = requests.request('GET', cab_api).text
+        cab = json.loads(cab_str)
+    except Exception,ex:
+        print ex
+        cab_str = "{}"
+        cab = json.loads(cab_str)
+    try:
+        fac_str = requests.request('GET', fac_api).text
+        fac = json.loads(fac_str)
+    except Exception,ex:
+        print ex
+        fac_str = "{}"
+        fac = json.loads(fac_str)
+    try:
+        std_str = requests.request('GET', std_api).text
+        std = json.loads(std_str)
+    except Exception,ex:
+        print ex
+        std_str = "{}"
+        std = json.loads(std_str)
+    result_nodata = {}
+    result_fail = {}
+    result_ok = {}
+    result = {"nodata":result_nodata, "fail":result_fail, "ok":result_ok}
+    idc_count = {}
+    model_count = {}
+    fac_my = {}
+    if fac:
+        for item in fac.values():
+            t_fac_my = {}
+            t_item = json.loads(json.loads(item)["val"])
+            sn = json.loads(item)["s"]
+            prod = t_item["manu"].split(' ')[0]
+            t_fac_my["cpu"] = t_item["cpu"]
+            t_fac_my["machine_type"] = t_item["manu"]
+            t_fac_my["create_raid"] = t_item["create_raid"]
+            t_fac_my["mem"] = t_item["mem"]
+        
+            #mtype-interface-size-rpm-inch
+            disks = t_item["disk"].split('&')
+            p_result = {}
+            # 3=raid:1;interface:SAS;size:300;rpm:10000;inch:2.5;device:\\\/dev\\\/sda;sn:S0K61YV8;model:ST300MM0006;mtype:HDD;raid_level:0;state:Online-Spun-Up;e1:-1;e2:-1;e3:-1;e4:0;e5:0;e6:0
+            # nvme0=raid:-1;interface:NVME;vender:Intel;size:800;rpm:0;inch:2.5;device:\/dev\/nvme0n1;sn:CVMD51060090800GGN;model:SSDPE2ME800G4;mtype:SSD;raid_level:na;state:OK;e1:-1;e2:-1;e3:-1;e4:-1;e5:-1;e6:-1
+            pattern = re.compile(".*interface:(.*?);.*size:(.*?);.*rpm:(.*?);.*inch:(.*?);.*mtype:(.*?);")
+            p_result = {}
+            for item in disks:
+                try:
+                    t_result = pattern.match(item)
+                    item = t_result.expand(r'\5-\1-\2G-\3-\4')
+                    if item not in p_result.keys():
+                        p_result[item] = 0
+                    p_result[item] = p_result[item]+1
+                except Exception,ex:
+                    #i_model_pattern = re.compile(".*model:(.*?);")
+                    #t_result = i_model_pattern.match(item)
+                    #i_model = t_result.expand(r'\1')
+                    #print i_model
+                    print ex
+            t_fac_my["disk"] = p_result
+            print t_fac_my["machine_type"],p_result
+        
+            try:
+                nics = t_item["netcard"].split('&')
+                p_result = {}
+                pattern = re.compile(".*model:(.*?);")
+                for item in nics:
+                    t_result = pattern.match(item)
+                    item = t_result.expand(r'\1')
+                    item = item.split('-')
+                    item.insert(-1,'IN-CI')
+                    item = '-'.join(item)
+                    if item not in p_result.keys():
+                        p_result[item] = 0
+                    p_result[item] = p_result[item]+1 
+            except Exception,ex:
+                print ex
+                p_result = {}
+            t_fac_my["netcard"] = p_result
+            pattern = re.compile(".*ilo_auth=(\w+)")
+            try:
+                t_result = pattern.match(t_item["machine"])
+                p_result = t_result.expand(r'\1')
+            except:
+                p_result = "err"
+            t_fac_my["ilo_stat"] = p_result
+            pattern = re.compile(".*ilo_ip=(.*?)&")
+            try:
+                t_result = pattern.match(t_item["machine"])
+                p_result = t_result.expand(r'\1')
+            except:
+                p_result = "err"
+            t_fac_my["ilo_ip"] = p_result
+            t_fac_my["eth0"] = t_item["mac"]["mac0"]
+            t_fac_my["eth1"] = t_item["mac"]["mac1"]
+            pattern = re.compile(".*power_num=(\d+)")
+            try:
+                t_result = pattern.match(t_item["machine"])
+                p_result = t_result.expand(r'\1')
+            except:
+                p_result = "0"
+            t_fac_my["power"] = p_result
+            for item in cab.keys():
+                if "cable1" in t_fac_my.keys() and "cable0" in t_fac_my.keys():break
+                if t_fac_my["eth0"] in cab[item]:
+                    #print item,t_fac_my["eth0"],cab[item]
+                    t_fac_my["cable0"] = item
+                    continue
+                if t_fac_my["eth1"] in cab[item]:
+                    #print item,t_fac_my["eth1"],cab[item]
+                    t_fac_my["cable1"] = item
+                    continue
+            else:
+                if "cable0" not in t_fac_my.keys(): t_fac_my["cable0"] = ""
+                if "cable1" not in t_fac_my.keys(): t_fac_my["cable1"] = ""
+            #print 'fac',sn,t_fac_my["cable0"],t_fac_my["cable1"]
+            fac_my[sn] = t_fac_my
+        
+    for item in std:
+        i_machine_type = std[item]["machine_type"].split(' ')[0]
+        i_idc = std[item]["idc"]
+        if i_machine_type == "Lenovo" and username == "Lenovo":
+            if std[item]["idc"] in idcs or not idcs:
+                if i_machine_type not in model_count.keys():
+                    model_count[i_machine_type] = {}
+                    model_count[i_machine_type]["sum"] = 0
+                    model_count[i_machine_type]["ok"] = 0
+                    model_count[i_machine_type]["fail"] = 0
+                if i_idc not in idc_count.keys():
+                    idc_count[i_idc] = {}
+                    idc_count[i_idc]["sum"] = 0
+                    idc_count[i_idc]["ok"] = 0
+                    idc_count[i_idc]["fail"] = 0
+                model_count[i_machine_type]["sum"] = model_count[i_machine_type]["sum"] +1
+                idc_count[i_idc]["sum"] = idc_count[i_idc]["sum"]+1
+                t_result = check_data(item,fac_my,std) 
+                #print 'lenovo'
+                #result[item] = t_result
+                if t_result["stat"] == "nodata":
+                    result_nodata[item] = t_result
+                    model_count[i_machine_type]["fail"] = model_count[i_machine_type]["fail"] +1
+                    idc_count[i_idc]["fail"] = idc_count[i_idc]["fail"]+1
+                elif t_result["stat"] == "ok":
+                    result_ok[item] = t_result
+                    model_count[i_machine_type]["ok"] = model_count[i_machine_type]["ok"] +1
+                    idc_count[i_idc]["ok"] = idc_count[i_idc]["ok"]+1
+                else:
+                    result_fail[item] = t_result
+                    model_count[i_machine_type]["fail"] = model_count[i_machine_type]["fail"] +1
+                    idc_count[i_idc]["fail"] = idc_count[i_idc]["fail"]+1
+        elif std[item]["machine_type"].split(' ')[0] != "Lenovo" and username == "Dell":
+            if std[item]["idc"] in idcs or not idcs:
+                if i_machine_type not in model_count.keys():
+                    model_count[i_machine_type] = {}
+                    model_count[i_machine_type]["sum"] = 0
+                    model_count[i_machine_type]["ok"] = 0
+                    model_count[i_machine_type]["fail"] = 0
+                if i_idc not in idc_count.keys():
+                    idc_count[i_idc] = {}
+                    idc_count[i_idc]["sum"] = 0
+                    idc_count[i_idc]["ok"] = 0
+                    idc_count[i_idc]["fail"] = 0
+                model_count[i_machine_type]["sum"] = model_count[i_machine_type]["sum"] +1
+                idc_count[i_idc]["sum"] = idc_count[i_idc]["sum"]+1
+                t_result = check_data(item,fac_my,std) 
+                #print 'dell'
+                #result[item] = t_result
+                if t_result["stat"] == "nodata":
+                    result_nodata[item] = t_result
+                    model_count[i_machine_type]["fail"] = model_count[i_machine_type]["fail"] +1
+                    idc_count[i_idc]["fail"] = idc_count[i_idc]["fail"]+1
+                elif t_result["stat"] == "ok":
+                    result_ok[item] = t_result
+                    model_count[i_machine_type]["ok"] = model_count[i_machine_type]["ok"] +1
+                    idc_count[i_idc]["ok"] = idc_count[i_idc]["ok"]+1
+                else:
+                    result_fail[item] = t_result
+                    model_count[i_machine_type]["fail"] = model_count[i_machine_type]["fail"] +1
+                    idc_count[i_idc]["fail"] = idc_count[i_idc]["fail"]+1
+        elif role == "Admin" or role == "sogouer":
+            if std[item]["idc"] in idcs or not idcs:
+                if i_machine_type not in model_count.keys():
+                    model_count[i_machine_type] = {}
+                    model_count[i_machine_type]["sum"] = 0
+                    model_count[i_machine_type]["ok"] = 0
+                    model_count[i_machine_type]["fail"] = 0
+                if i_idc not in idc_count.keys():
+                    idc_count[i_idc] = {}
+                    idc_count[i_idc]["sum"] = 0
+                    idc_count[i_idc]["ok"] = 0
+                    idc_count[i_idc]["fail"] = 0
+                model_count[i_machine_type]["sum"] = model_count[i_machine_type]["sum"] +1
+                idc_count[i_idc]["sum"] = idc_count[i_idc]["sum"]+1
+                t_result = check_data(item,fac_my,std) 
+                #print 'sogouer'
+                #result[item] = t_result
+                if t_result["stat"] == "nodata":
+                    result_nodata[item] = t_result
+                    model_count[i_machine_type]["fail"] = model_count[i_machine_type]["fail"] +1
+                    idc_count[i_idc]["fail"] = idc_count[i_idc]["fail"]+1
+                elif t_result["stat"] == "ok":
+                    result_ok[item] = t_result
+                    model_count[i_machine_type]["ok"] = model_count[i_machine_type]["ok"] +1
+                    idc_count[i_idc]["ok"] = idc_count[i_idc]["ok"]+1
+                else:
+                    result_fail[item] = t_result
+                    model_count[i_machine_type]["fail"] = model_count[i_machine_type]["fail"] +1
+                    idc_count[i_idc]["fail"] = idc_count[i_idc]["fail"]+1
+    kwvars = {
+        'request':request,
+        'result': result,
+        'idc_count': idc_count,
+        'model_count': model_count,
+        'idcs': idcs,
+        'allidcs': allidcs,
+        'title':'工单系统-基础信息-机房信息列表',
+        #'postUrl':'/workorder/idc/list/',
+    }
+    return render_to_response('shelves/index.html',kwvars,RequestContext(request))
+
+def check_data(item,fac_my,std):
+    t_result = {}
+    prod = std[item]["machine_type"].split(' ')[0]
+    t_result["sn"] = item
+    t_result["rack_id"] = std[item]["rack_id"]
+    t_result["idc"] = std[item]["idc"]
+    t_result["machine_type"] = std[item]["machine_type"]
+    if item in fac_my.keys():
+        t_result["stat"] = "ok"
+        # cpu
+        if std[item]["cpu"] == fac_my[item]["cpu"]:
+            t_result["cpu"] = std[item]["cpu"]
+        else:
+            t_result["cpu"] = "{std_cpu}<font color='red'> ({real_cpu})</font>".format(std_cpu = std[item]["cpu"], real_cpu = fac_my[item]["cpu"])
+            t_result["stat"] = "fail"
+
+        # mem
+        std_mems = std[item]["mem"].split('+')
+        std_mems = [ x.split('-')[-1] for x in std_mems]
+        std_mem = '+'.join(std_mems)
+        if std_mem == fac_my[item]["mem"]:
+            t_result["mem"] = std[item]["mem"]
+        else:
+            t_result["mem"] = "{std_mem}<font color='red'> ({real_mem})</font>".format(std_mem = std_mem, real_mem = fac_my[item]["mem"])
+            t_result["stat"] = "fail"
+
+        # disk
+        std_disks = std[item]["disk"].split('+')
+        std_disks_dic = {}
+        for disk_item in std_disks:
+            type = "-".join(disk_item.split('*')[0].split('-')[1:])
+            num = disk_item.split('*')[1]
+            std_disks_dic[type] = int(num)
+        if std_disks_dic == fac_my[item]["disk"]:
+            t_result["disk"] = std[item]["disk"]
+        else:
+            real_disk = ""
+            for iitem in fac_my[item]["disk"]:
+                if iitem.split('-')[0] == "SSD" or iitem.split('-')[0] == "NVME":
+                    iprod = "Intel"
+                else:
+                    iprod = prod
+                disk_str = "{prod}-{type}*{num}".format(prod = iprod, type = iitem, num = fac_my[item]["disk"][iitem])
+                if real_disk:
+                    real_disk = "{real_disk}+{disk_str}".format(real_disk = real_disk, disk_str = disk_str)
+                else:
+                    real_disk = disk_str
+            t_result["disk"] = "{std_disk}<font color='red'> ({real_disk})</font>".format(std_disk = std[item]["disk"], real_disk = real_disk)
+            t_result["stat"] = "fail"
+
+        # netcard
+        std_nics = std[item]["netcard"].split('+')
+        std_nics_dic = {}
+        for nic_item in std_nics:
+            type = nic_item.split('*')[0]
+            num = nic_item.split('*')[1]
+            std_nics_dic[type] = int(num)
+        if std_nics_dic == fac_my[item]["netcard"]:
+            t_result["netcard"] = std[item]["netcard"]
+        else:
+            real_nic = ""
+            for iitem in fac_my[item]["netcard"]:
+                if real_nic: 
+                    real_nic = "{real_nic}+{type}*{num}".format(real_nic = real_nic, type = iitem, num = fac_my[item]["netcard"][iitem])
+                else:
+                    real_nic = "{type}*{num}".format(type = iitem, num = fac_my[item]["netcard"][iitem])
+            t_result["netcard"] = "{std_nic}<font color='red'> ({real_nic})</font>".format(std_nic = std[item]["netcard"], real_nic = real_nic)
+            t_result["stat"] = "fail"
+
+        # power
+        std_num = std[item]["power"].split('*')[1]
+        if std_num == fac_my[item]["power"]:
+            t_result["power"] = std[item]["power"]
+        else:
+            t_result["power"] = "{std_power}<font color='red'> ({real_power})</font>".format(std_power = std[item]["power"], real_power = fac_my[item]["power"])
+            t_result["stat"] = "fail"
+
+        # ilo_ip
+        for ip_item in std[item]["ip_detail"]:
+            if ip_item["eth"] == "ethilo":
+                std_ilo = ip_item["ip"]
+            elif ip_item["eth"] == "eth0":
+                std_cable0 = ip_item["cable_id"]
+            elif ip_item["eth"] == "eth1":
+                std_cable1 = ip_item["cable_id"]
+        #print 'std',item,std_cable0,std_cable1
+        if std_ilo == fac_my[item]["ilo_ip"]:
+            t_result["ilo_ip"] = std_ilo
+        else:
+            t_result["ilo_ip"] = "{std_ilo}<font color='red'> ({real_ilo})</font>".format(std_ilo = std_ilo, real_ilo = fac_my[item]["ilo_ip"])
+            t_result["stat"] = "fail"
+
+        # cable0,cable1
+        #print item,std_cable0,fac_my[item]["cable0"]
+        if std_cable0 == fac_my[item]["cable0"]:
+            t_result["cable0"] = std_cable0
+        else:
+            t_result["cable0"] = "{std_cable0}<font color='red'> ({real_cable0})</font>".format(std_cable0 = std_cable0, real_cable0 = fac_my[item]["cable0"])
+            t_result["stat"] = "fail"
+        if std_cable1 == fac_my[item]["cable1"]:
+            t_result["cable1"] = std_cable1
+        else:
+            t_result["cable1"] = "{std_cable1}<font color='red'> ({real_cable1})</font>".format(std_cable1 = std_cable1, real_cable1 = fac_my[item]["cable1"])
+            t_result["stat"] = "fail"
+
+        # eth0 mac, eth1 mac
+        if std[item]["mac"]["eth0"] == fac_my[item]["eth0"]:
+            t_result["eth0"] = std[item]["mac"]["eth0"]
+        else:
+            t_result["eth0"] = "{std_eth0}<font color='red'> ({real_eth0})</font>".format(std_eth0 = std[item]["mac"]["eth0"], real_eth0 = fac_my[item]["eth0"])
+            t_result["stat"] = "fail"
+        if std[item]["mac"]["eth1"] == fac_my[item]["eth1"]:
+            t_result["eth1"] = std[item]["mac"]["eth1"]
+        else:
+            t_result["eth1"] = "{std_eth1}<font color='red'> ({real_eth1})</font>".format(std_eth1 = std[item]["mac"]["eth1"], real_eth1 = fac_my[item]["eth1"])
+            t_result["stat"] = "fail"
+
+        t_result["ilo_stat"] = fac_my[item]["ilo_stat"]
+        if t_result["ilo_stat"] == "ok":
+            t_result["ilo_stat"] = "ilo Ok"
+        else:
+            t_result["ilo_stat"] = "error"
+            t_result["stat"] = "fail"
+         
+        t_result["create_raid"] = fac_my[item]["create_raid"]
+        if t_result["create_raid"] == "fail":
+            t_result["stat"] = "fail"
+    else:
+        t_result["stat"] = "nodata"
+    return t_result

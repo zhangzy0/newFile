@@ -1,0 +1,256 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*-
+from django.http import HttpResponse,HttpResponseRedirect
+from django.shortcuts import render_to_response,RequestContext
+from django.contrib.auth.decorators import login_required
+from django.db.models import Q
+from apps.usermanage.views.permission import PermissionVerify
+from apps.workorder.models import IDCList, SpareBrandList, ModelList
+from apps.shelves.models import CheckCount, StandardData, CheckFailData
+from plugins.myclass.shelves_models import StandardDataOb, CheckFailDataOb
+from plugins.apps.shelves import each_count, std_json2dic, std_db2dic, fac_json2dic, resultCount
+from datetime import date
+import requests
+import sys
+import json
+import re
+import time
+import datetime
+import logging
+
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+logger = logging.getLogger('shelves')
+
+def shelvesCheckOK(request):
+    idate = time.strftime("%Y-%m-%d",time.localtime(time.time()))
+    year = int(idate.split('-')[0])
+    month = int(idate.split('-')[1])
+    day = int(idate.split('-')[2])
+    result = StandardData.objects.filter(std_check_ok = 1, std_update__gt = date(year,month,day))
+    response_data = [ {"sn":x.std_sn,"status":x.std_check_ok} for x in result ]
+    kwvars = {
+        'request':request,
+        'title':'工单系统-基础信息-机房信息列表',
+        'body':'1',
+    }
+    return HttpResponse(json.dumps(response_data), content_type="application/json")  
+
+@login_required
+@PermissionVerify()
+def shelvesHelp(request):
+    kwvars = {
+        'request':request,
+        'title':'上架验收-帮助',
+        #'postUrl':'/workorder/idc/list/',
+    }
+    return render_to_response('shelves/help.html',kwvars,RequestContext(request))
+
+@login_required
+@PermissionVerify()
+def shelvesCheckCount(request):
+    
+
+
+
+
+
+
+
+    kwvars = {
+        'request':request,
+        'title':'上架验收-统计查询',
+    }
+    return render_to_response('shelves/checkcount.html',kwvars,RequestContext(request))
+
+@login_required
+@PermissionVerify()
+def shelvesHome2(request):
+    url = "http://10.134.35.53/api/web.php?batch=purchase-{year_month}".format(year_month = "2016-10")
+    body = requests.get(url)
+    kwvars = {
+        'request':request,
+        'body': body.text,
+        'title':'工单系统-基础信息-机房信息列表',
+        #'postUrl':'/workorder/idc/list/',
+    }
+    return render_to_response('shelves/index2.html',kwvars,RequestContext(request))
+
+
+@login_required
+@PermissionVerify()
+def shelvesHome(request):
+    print 'start',time.time()
+    action = request.GET.get("action")
+    start = time.time()
+    role = request.user.role.role_en
+    username = request.user.username
+    idcs = request.POST.getlist("idc")
+    brands = request.POST.getlist("brand")
+    allidcs = IDCList.objects.filter(idc_enable = True )
+    allbrands = SpareBrandList.objects.filter(brand_enable = True )
+    imonth = time.strftime("%Y-%m",time.localtime(time.time()))
+    idate = time.strftime("%Y-%m-%d",time.localtime(time.time()))
+    year = int(idate.split('-')[0])
+    month = int(idate.split('-')[1])
+    day = int(idate.split('-')[2])
+    cab_api="http://10.136.130.232/net/info"
+    fac_api="http://10.142.113.58/check/purchase/index.php?act=data&p=purchase-{imonth}".format(imonth = imonth)
+    std_api="http://roc.sogou/pandora/srv_online/loadInterfaceShelvesCheck?type=purchase"
+    result_nodata = {}
+    result_fail = {}
+    result_ok = {}
+    result_count = {}
+    try:
+        fac_str = requests.request('GET', fac_api).text
+        fac_json = json.loads(fac_str)
+        if str(fac_json) == "f":
+            print 'error'
+            raise TypeError
+        fac_fp = open("fac.txt","r")
+        lines = fac_fp.readlines()[0]
+        fac_json = json.loads(lines)
+        print 'xxxxxxxxxxxxxxxxx',len(fac_json)
+    except Exception,ex:
+        print 'fac_str:',ex
+        fac_str = "{}"
+        fac_json = json.loads(fac_str)
+    print 'end getfac data',time.time()
+
+    try:
+        std_str = requests.request('GET', std_api).text
+        std_json = json.loads(std_str)
+    except Exception,ex:
+        print "std_str:",ex
+        std_str = "{}"
+        std_json = json.loads(std_str)
+    print 'end getstd data',time.time()
+
+    try:
+        cab_str = requests.request('GET', cab_api).text
+        cab = json.loads(cab_str)
+    except Exception,ex:
+        print 'cab_str:',ex
+        cab_str = "{}"
+        cab = json.loads(cab_str)
+    print 'end getcab data',time.time()
+
+    fac = {}
+    if fac_json:
+        for item in fac_json.values():
+            t_fac = fac_json2dic(item = item,cab = cab)
+            sn = json.loads(item)["s"]
+            fac[sn] = t_fac
+    print 'end fac2dic',time.time()
+
+    # get std from db
+    std_db = StandardData.objects.filter(std_date = idate )
+    print 'end getstd from db',time.time()
+    # if std_db not exist, get from url and insert to db
+    if not std_db or action == "update":
+    #if True:
+        std = {}
+        try:
+            for item in std_json:
+                std_sn = item
+                std[std_sn] = std_json2dic(item = item,std_json = std_json)
+                flag = StandardData.objects.filter(std_sn = std_sn )
+                model_en = ' '.join(std[std_sn]["model"].split(' ')[1:])
+                id_model = ModelList.objects.get(model_en = model_en)
+                idc_en = std[std_sn]["idc"]
+                id_idc = IDCList.objects.get(idc_en = idc_en)
+                if flag:
+                    flag, desc = StandardDataOb().upall(std_sn = std_sn,id_idc = id_idc,
+                                                      id_model = id_model, std_rack_id = std[std_sn]["rack_id"],
+                                                      std_ilo_ip = std[std_sn]["ilo_ip"], std_cpu = std[std_sn]["cpu"],
+                                                      std_mem = std[std_sn]["mem"], std_disk = std[std_sn]["disk"],
+                                                      std_nic = std[std_sn]["netcard"], std_nic_speed = std[std_sn]["nic_speed"],
+                                                      std_power = std[std_sn]["power"], std_mac0 = std[std_sn]["mac0"],
+                                                      std_mac1 = std[std_sn]["mac1"], 
+                                                      std_cable0 = std[std_sn]["cable0"], std_cable1 = std[std_sn]["cable1"])
+                else:
+                    flag, desc = StandardDataOb().new(std_sn = std_sn, std_batch = std[std_sn]["batch"], id_idc = id_idc,
+                                                      id_model = id_model, std_rack_id = std[std_sn]["rack_id"],
+                                                      std_ilo_ip = std[std_sn]["ilo_ip"], std_cpu = std[std_sn]["cpu"],
+                                                      std_mem = std[std_sn]["mem"], std_disk = std[std_sn]["disk"],
+                                                      std_nic = std[std_sn]["netcard"], std_nic_speed = std[std_sn]["nic_speed"],
+                                                      std_power = std[std_sn]["power"], std_mac0 = std[std_sn]["mac0"],
+                                                      std_mac1 = std[std_sn]["mac1"], 
+                                                      std_cable0 = std[std_sn]["cable0"], std_cable1 = std[std_sn]["cable1"])
+                if flag is True:
+                    logger.info("StandardData:success:[%s]%s\nDetail:%s" %(std[std_sn]["batch"],std_sn,desc))
+                else:
+                    logger.error("StandardData:fail:[%s]%s\nError Log:%s" %(std[std_sn]["batch"],std_sn,desc))
+
+        except Exception,ex:
+            print 'std_str:',ex
+            std_str = "{}"
+            std = json.loads(std_str)
+    print 'end_insertdb std',time.time()
+    # get std from db ( currentdate and check_fail )
+    idate_dt = date(year, month, day)
+    std_db = StandardData.objects.filter(Q(std_check_ok = 0) | Q(std_update__gt = idate_dt))
+    print 'end getstd_fromdb',time.time()
+    std = {}
+    for item in std_db:
+        std_sn = item.std_sn
+        #t_std = std_db2dic(item = item)
+        std[std_sn] = item
+    print 'end std2dic',time.time()
+    
+    for item in std:
+        brand = std[item].id_model.id_brand.brand_en
+        idc = std[item].id_idc.idc_en
+        batch = std[item].std_batch
+        tmp_nodata = {}
+        tmp_fail = {}
+        tmp_ok = {}
+        if brand == "Lenovo" and ( username == "Lenovo" or username == "surecoteam" ):
+            if std[item]["idc"] in idcs or not idcs:
+                if std[item].std_check_ok == 1:
+                    tmp_ok[item] = std[item]
+                    result_count = resultCount(result_count,batch,idc,brand,"ok")
+                else:    
+                    result_count,tmp_nodata,tmp_fail,tmp_ok = each_count(result_count = result_count, fac = fac, std = std, item = item, batch = batch, idc = idc, brand = brand)
+        elif brand != "Lenovo" and ( username == "Dell" or username == "dcitsteam" ):
+            if std[item]["idc"] in idcs or not idcs:
+                if std[item].std_check_ok == 1:
+                    tmp_ok[item] = std[item] 
+                    result_count = resultCount(result_count,batch,idc,brand,"ok")
+                else:    
+                    result_count,tmp_nodata,tmp_fail,tmp_ok = each_count(result_count = result_count, fac = fac, std = std, item = item, batch = batch, idc = idc, brand = brand)
+        elif role == "Admin" or role == "sogouer":
+            if idc in idcs or not idcs:
+                if brand in brands or not brands:
+                    if std[item].std_check_ok == 1:
+                        tmp_ok[item] = std[item] 
+                        result_count = resultCount(result_count,batch,idc,brand,"ok")
+                    else:    
+                        result_count,tmp_nodata,tmp_fail,tmp_ok = each_count(result_count = result_count, fac = fac, std = std, item = item, batch = batch, idc = idc, brand = brand)
+        if tmp_nodata:
+            result_nodata = dict(result_nodata, **tmp_nodata )
+        if tmp_fail:result_fail = dict( result_fail, **tmp_fail )
+        if tmp_ok:result_ok = dict( result_ok, **tmp_ok )
+    print 'end check',time.time()
+    for item in result_count:
+        result_count[item]["fail_sum"] = 0
+        for iitem in result_count[item]["idc_count"]:
+            result_count[item]["fail_sum"] += result_count[item]["idc_count"][iitem]["fail"]
+    result = {"nodata":result_nodata, "fail":result_fail, "ok":result_ok}
+    print 'end',time.time()
+        
+    kwvars = {
+        'request':request,
+        'result': result,
+        'result_count': result_count,
+        'idcs': idcs,
+        'allidcs': allidcs,
+        'brands': brands,
+        'allbrands': allbrands,
+        'title':'工单系统-基础信息-机房信息列表',
+        #'postUrl':'/workorder/idc/list/',
+    }
+    return render_to_response('shelves/index.html',kwvars,RequestContext(request))
+
+
